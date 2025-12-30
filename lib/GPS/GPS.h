@@ -143,6 +143,30 @@ struct GPSData {
     String lastValidSentence;          // Last valid sentence type
 };
 
+// ============================================================================
+// NMEA SENTENCE BUFFERING
+// ============================================================================
+
+/**
+ * NMEA Sentence Record
+ * Stores a complete NMEA sentence with validity flag
+ */
+struct NMEASentence {
+    char data[82];                     // Raw NMEA sentence (NMEA standard max length)
+    bool valid;                        // Checksum valid
+    uint32_t timestamp;                // When received (millis)
+};
+
+/**
+ * NMEA Sentence Buffer (Circular Buffer)
+ * Stores recent NMEA sentences for debugging
+ */
+struct NMEABuffer {
+    NMEASentence sentences[50];        // Last 50 sentences
+    int head;                          // Next write position
+    int count;                         // Number of valid entries
+};
+
 /**
  * Individual Satellite Information
  */
@@ -233,6 +257,10 @@ struct SystemHealth {
     bool criticalAlert;                // Critical issue present
     bool warningAlert;                 // Warning condition present
     char alertMessage[128];            // Current alert description
+
+    // Health issues array
+    char healthIssues[10][80];         // Up to 10 issues, 80 chars each
+    uint8_t issueCount;                // Number of issues in array
     
     uint32_t lastCalculation;          // Last health calculation time
 };
@@ -321,6 +349,9 @@ public:
     
     // Get configuration
     const GPSConfig& getConfig() const { return config; }
+
+    // Get NMEA sentence buffer
+    const NMEABuffer& getNMEABuffer() const { return nmeaBuffer; }
     
     // ========================================================================
     // QUERY HELPERS
@@ -396,6 +427,9 @@ private:
     String gpsBuffer;                  // NMEA sentence buffer
     bool gpsLineReady;                 // Complete sentence flag
     
+    // NEW: NMEA debugging buffer
+    NMEABuffer nmeaBuffer;             // Circular buffer for debug
+    
     void (*logCallback)(String) = nullptr;  // Optional logging
     
     // ========================================================================
@@ -410,6 +444,8 @@ private:
     // NMEA Parsing
     void parseNMEASentence(const String& sentence);
     void parseGSVSentence(const char* sentence, uint8_t constellation);
+    bool validateNMEAChecksum(const String& sentence);
+    void storeNMEASentence(const String& sentence, bool valid);
     void parseGPGSVSentence(const char* sentence);
     void parseGLGSVSentence(const char* sentence);
     void parseGAGSVSentence(const char* sentence);
@@ -435,6 +471,7 @@ private:
     uint8_t calculateFixAgeScore();
     uint8_t calculateFixModeScore();
     void updateAlerts();
+    void addHealthIssue(const char* issue);
     
     // Event Management
     void addEvent(EventType type, const char* message);
@@ -480,6 +517,7 @@ void GPS::begin(uint8_t rxPin, uint8_t txPin, uint32_t baud, uint8_t updateRate)
     health.criticalAlert = false;
     health.warningAlert = false;
     health.alertMessage[0] = '\0';
+    health.issueCount = 0;
     health.lastCalculation = 0;
     
     watchdog.lastCharReceived = millis();
@@ -491,6 +529,7 @@ void GPS::begin(uint8_t rxPin, uint8_t txPin, uint32_t baud, uint8_t updateRate)
     gpsBuffer = "";
     gpsLineReady = false;
     
+    memset(&nmeaBuffer, 0, sizeof(NMEABuffer));
     memset(&gpsData, 0, sizeof(GPSData));
     
     // Configure GPS module
@@ -646,6 +685,12 @@ void GPS::process() {
         // Process complete sentence
         if (gpsLineReady) {
             gpsLineReady = false;
+            
+            // NEW: Validate and store for debugging
+            bool valid = validateNMEAChecksum(gpsBuffer);
+            storeNMEASentence(gpsBuffer, valid);
+            
+            // Parse the sentence
             parseNMEASentence(gpsBuffer);
             gpsBuffer = "";
         }
@@ -785,7 +830,7 @@ void GPS::parseGSVSentence(const char* sentence, uint8_t constellationType) {
         if (slotIndex >= 0 && slotIndex < MAX_SATELLITES) {
             SatelliteInfo& sat = satTracking.satellites[slotIndex];
             sat.prn = prn;
-            sat.constellation = 0;  // Unknown until GNGSA tells us
+            sat.constellation = constellationType; 
             sat.elevation = elevation;
             sat.azimuth = azimuth;
             sat.snr = snr;
@@ -1221,6 +1266,9 @@ void GPS::checkHeartbeat() {
 }
 
 void GPS::calculateHealth() {
+    // Clear previous issues
+    health.issueCount = 0;
+
     // Calculate component scores
     health.satelliteScore = calculateSatelliteScore();
     health.hdopScore = calculateHDOPScore();
@@ -1248,31 +1296,95 @@ uint8_t GPS::calculateSatelliteScore() {
     int sats = gpsData.satellites;
     if (sats >= 12) return 100;
     if (sats >= 8) return 80;
-    if (sats >= 6) return 60;
-    if (sats >= 4) return 40;
-    if (sats >= 1) return 20;
+    
+    if (sats >= 6) {
+        addHealthIssue("Only 6-7 satellites visible (8+ recommended for best performance)");
+        return 60;
+    }
+    if (sats >= 4) {
+        char msg[80];
+        snprintf(msg, sizeof(msg), "Low satellite count (only %d visible, need at least 8)", sats);
+        addHealthIssue(msg);
+        return 40;
+    }
+    if (sats >= 1) {
+        char msg[80];
+        snprintf(msg, sizeof(msg), "Very low satellite count (%d satellites insufficient for good fix)", sats);
+        addHealthIssue(msg);
+        return 20;
+    }
+    
+    addHealthIssue("No satellites visible");
     return 0;
 }
 
 uint8_t GPS::calculateHDOPScore() {
     double hdop = gpsData.hdop;
-    if (hdop == 0) return 0;
+    if (hdop == 0) {
+        addHealthIssue("HDOP not available (waiting for GPS data)");
+        return 0;
+    }
+    
     if (hdop <= 1.0) return 100;
     if (hdop <= 2.0) return 80;
-    if (hdop <= 5.0) return 60;
-    if (hdop <= 10.0) return 40;
-    if (hdop <= 20.0) return 20;
+    
+    if (hdop <= 5.0) {
+        char msg[80];
+        snprintf(msg, sizeof(msg), "HDOP is %.1f (acceptable but not ideal, should be below 2.0)", hdop);
+        addHealthIssue(msg);
+        return 60;
+    }
+    if (hdop <= 10.0) {
+        char msg[80];
+        snprintf(msg, sizeof(msg), "High HDOP of %.1f (poor accuracy, should be below 5.0)", hdop);
+        addHealthIssue(msg);
+        return 40;
+    }
+    if (hdop <= 20.0) {
+        char msg[80];
+        snprintf(msg, sizeof(msg), "Very high HDOP of %.1f (very poor accuracy)", hdop);
+        addHealthIssue(msg);
+        return 20;
+    }
+    
+    char msg[80];
+    snprintf(msg, sizeof(msg), "Extremely high HDOP of %.1f (unreliable position)", hdop);
+    addHealthIssue(msg);
     return 10;
 }
 
 uint8_t GPS::calculateSNRScore() {
     float avgSNR = getAverageSNR(0);
-    if (avgSNR == 0) return 0;
+    if (avgSNR == 0) {
+        addHealthIssue("Signal strength not available (no satellite data)");
+        return 0;
+    }
+    
     if (avgSNR >= 40) return 100;
     if (avgSNR >= 35) return 80;
-    if (avgSNR >= 30) return 60;
-    if (avgSNR >= 25) return 40;
-    if (avgSNR >= 20) return 20;
+    
+    if (avgSNR >= 30) {
+        char msg[80];
+        snprintf(msg, sizeof(msg), "Average signal strength is %.1f dB (adequate but not strong)", avgSNR);
+        addHealthIssue(msg);
+        return 60;
+    }
+    if (avgSNR >= 25) {
+        char msg[80];
+        snprintf(msg, sizeof(msg), "Weak signal strength of %.1f dB (should be above 35 dB)", avgSNR);
+        addHealthIssue(msg);
+        return 40;
+    }
+    if (avgSNR >= 20) {
+        char msg[80];
+        snprintf(msg, sizeof(msg), "Very weak signal of %.1f dB (poor reception)", avgSNR);
+        addHealthIssue(msg);
+        return 20;
+    }
+    
+    char msg[80];
+    snprintf(msg, sizeof(msg), "Extremely weak signal of %.1f dB (check antenna)", avgSNR);
+    addHealthIssue(msg);
     return 10;
 }
 
@@ -1280,18 +1392,45 @@ uint8_t GPS::calculateFixAgeScore() {
     uint32_t age = gpsData.updateAge;
     if (age < 1000) return 100;
     if (age < 2000) return 80;
-    if (age < 5000) return 60;
-    if (age < 10000) return 40;
-    if (age < 30000) return 20;
+    
+    if (age < 5000) {
+        char msg[80];
+        snprintf(msg, sizeof(msg), "GPS data is %lu seconds old (should update every second)", age / 1000);
+        addHealthIssue(msg);
+        return 60;
+    }
+    if (age < 10000) {
+        char msg[80];
+        snprintf(msg, sizeof(msg), "GPS data is stale (%lu seconds old)", age / 1000);
+        addHealthIssue(msg);
+        return 40;
+    }
+    if (age < 30000) {
+        char msg[80];
+        snprintf(msg, sizeof(msg), "GPS data is very stale (%lu seconds old)", age / 1000);
+        addHealthIssue(msg);
+        return 20;
+    }
+    
+    char msg[80];
+    snprintf(msg, sizeof(msg), "GPS data timeout (%lu seconds since last update)", age / 1000);
+    addHealthIssue(msg);
     return 0;
 }
 
 uint8_t GPS::calculateFixModeScore() {
     switch(gpsData.fixMode) {
-        case 3: return 100;  // 3D fix
-        case 2: return 60;   // 2D fix
-        case 1: return 0;    // No fix
-        default: return 0;
+        case 3: 
+            return 100;  // 3D fix - perfect
+        case 2: 
+            addHealthIssue("GPS has 2D fix only (altitude not accurate, need 3D fix)");
+            return 60;
+        case 1: 
+            addHealthIssue("GPS has no position fix");
+            return 0;
+        default: 
+            addHealthIssue("GPS fix mode unknown");
+            return 0;
     }
 }
 
@@ -1352,6 +1491,14 @@ void GPS::updateAlerts() {
         snprintf(health.alertMessage, sizeof(health.alertMessage), 
                  "Low signal strength: %.1f dB", avgSNR);
         return;
+    }
+}
+
+void GPS::addHealthIssue(const char* issue) {
+    if (health.issueCount < 10) {
+        strncpy(health.healthIssues[health.issueCount], issue, 79);
+        health.healthIssues[health.issueCount][79] = '\0';
+        health.issueCount++;
     }
 }
 
@@ -1505,6 +1652,55 @@ void GPS::reset() {
 void GPS::log(const String& message) {
     if (logCallback != nullptr) {
         logCallback(message);
+    }
+}
+
+/**
+ * Validate NMEA checksum
+ */
+bool GPS::validateNMEAChecksum(const String& sentence) {
+    if (sentence.length() < 5 || sentence[0] != '$') return false;
+    
+    // Find asterisk
+    int asteriskPos = sentence.indexOf('*');
+    if (asteriskPos == -1) return false;  // No checksum
+    
+    // Calculate checksum
+    uint8_t checksum = 0;
+    for (int i = 1; i < asteriskPos; i++) {
+        checksum ^= sentence[i];
+    }
+    
+    // Parse provided checksum
+    String checksumStr = sentence.substring(asteriskPos + 1, asteriskPos + 3);
+    uint8_t provided = (uint8_t)strtol(checksumStr.c_str(), NULL, 16);
+    
+    return checksum == provided;
+}
+
+/**
+ * Store NMEA sentence in buffer for debugging
+ */
+void GPS::storeNMEASentence(const String& sentence, bool valid) {
+    if (sentence.length() == 0) return;
+    
+    // Get next buffer position
+    int idx = nmeaBuffer.head;
+    
+    // Copy sentence (truncate if too long)
+    strncpy(nmeaBuffer.sentences[idx].data, sentence.c_str(), 81);
+    nmeaBuffer.sentences[idx].data[81] = '\0';
+    
+    // Store metadata
+    nmeaBuffer.sentences[idx].valid = valid;
+    nmeaBuffer.sentences[idx].timestamp = millis();
+    
+    // Advance head
+    nmeaBuffer.head = (nmeaBuffer.head + 1) % 50;
+    
+    // Update count
+    if (nmeaBuffer.count < 50) {
+        nmeaBuffer.count++;
     }
 }
 
