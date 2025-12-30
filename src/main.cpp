@@ -276,6 +276,7 @@ void handleAPIHistory(WebRequest& req, WebResponse& res);
 void handleAPIRollingStats(WebRequest& req, WebResponse& res);
 void handleAPINTP(WebRequest& req, WebResponse& res);
 void handleAPIDashboard(WebRequest& req, WebResponse& res);
+void handleAPINMEA(WebRequest& req, WebResponse& res);
 void handle404(WebRequest& req, WebResponse& res);
 
 // Utility Functions
@@ -288,6 +289,8 @@ void checkPerformanceAlerts();                 // Check for performance issues
 unsigned char h2int(char c);                   // Convert hex character to integer (for URL decoding)
 
 #include "web_visualization.h"     // SVG sky plot & chart generators
+#include "web_common.h"            // Page structure
+#include "web_components.h"        // Page components
 #include "web_pages.h"             // Web pages
 
 // ============================================================================
@@ -391,6 +394,7 @@ void setup() {
     atom.addGETRoute("/config", handleConfigPage);
     atom.addPOSTRoute("/config/save", handleConfigSave);
     atom.addGETRoute("/debug", handleDebugPage);
+    atom.addGETRoute("/api/debug/nmea", handleAPINMEA);
     atom.addGETRoute("/metrics", handleMetricsPage);
     atom.addGETRoute("/logs", handleLogsPage);
     
@@ -538,7 +542,6 @@ void loop() {
 void handleStatusPage(WebRequest& req, WebResponse& res) {
     logMessage("Status page requested");
     String html = generateModernStatusHTML();
-    html += generateStatusPageJS();
     res.sendHTML(html);
 }
 
@@ -609,7 +612,8 @@ void handleConfigSave(WebRequest& req, WebResponse& res) {
 
 void handleDebugPage(WebRequest& req, WebResponse& res) {
     logMessage("Debug page requested");
-    res.send(200, "text/html", "<html><body><h1>Debug</h1><p>Not implemented yet</p></body></html>");
+    String html = generateModernDebugHTML();
+    res.sendHTML(html);
 }
 
 void handleMetricsPage(WebRequest& req, WebResponse& res) {
@@ -620,7 +624,6 @@ void handleMetricsPage(WebRequest& req, WebResponse& res) {
     webStats.lastRequestTime = millis();
     
     String html = generateModernMetricsHTML();
-    html += generateMetricsPageJS();
     
     res.sendHTML(html);
 }
@@ -633,6 +636,31 @@ void handleLogsPage(WebRequest& req, WebResponse& res) {
 void handleAPIDashboard(WebRequest& req, WebResponse& res) {
     String json = web_api::generateDashboardJSON(gps, ntpServer, networkState, metrics);
     res.send(200, "application/json", json);
+}
+
+void handleAPINMEA(WebRequest& req, WebResponse& res) {
+    const NMEABuffer& buffer = gps.getNMEABuffer();
+    
+    DynamicJsonDocument doc(4096);
+    
+    JsonArray sentences = doc.createNestedArray("sentences");
+    
+    // Return in reverse chronological order (newest first)
+    int startIdx = (buffer.head - 1 + 50) % 50;
+    for (int i = 0; i < buffer.count; i++) {
+        int idx = (startIdx - i + 50) % 50;
+        
+        JsonObject sentence = sentences.createNestedObject();
+        sentence["data"] = buffer.sentences[idx].data;
+        sentence["valid"] = buffer.sentences[idx].valid;
+        sentence["timestamp"] = buffer.sentences[idx].timestamp;
+    }
+    
+    doc["count"] = buffer.count;
+    
+    String output;
+    serializeJson(doc, output);
+    res.send(200, "application/json", output);
 }
 
 void handle404(WebRequest& req, WebResponse& res) {
