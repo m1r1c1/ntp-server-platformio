@@ -40,22 +40,20 @@
 String generateSkyPlotSVG() {
     String svg = "";
     
-    // SVG container with viewBox for responsiveness
-    svg += "<svg id='skyPlot' viewBox='0 0 400 400' xmlns='http://www.w3.org/2000/svg' ";
-    svg += "style='width:100%;max-width:400px;height:auto;margin:0 auto;display:block;'>\n";
+    // SVG container with viewBox for responsiveness - make wider to accommodate legend
+    svg += "<svg id='skyPlot' viewBox='0 0 550 400' xmlns='http://www.w3.org/2000/svg' ";
+    svg += "style='width:100%;max-width:550px;height:auto;margin:0 auto;display:block;'>\n";
     
     // Background
-    svg += "<rect width='400' height='400' fill='#f8fafc'/>\n";
+    svg += "<rect width='550' height='400' fill='#f8fafc'/>\n";
     
-    // Center point (200, 200)
-    int cx = 200;
+    // Offset center point to right to make room for legend
+    int cx = 300;  // Moved from 200 to 300
     int cy = 200;
     int maxRadius = 180;  // Maximum radius for 0° elevation
     
     // Draw elevation circles (concentric rings)
-    // Outer ring = 0° (horizon), center = 90° (zenith)
     for (int elev = 0; elev <= 90; elev += 30) {
-        // Convert elevation to radius (90° = center, 0° = edge)
         int radius = maxRadius - (elev * maxRadius / 90);
         
         svg += "<circle cx='" + String(cx) + "' cy='" + String(cy) + "' r='" + String(radius) + "' ";
@@ -69,9 +67,8 @@ String generateSkyPlotSVG() {
     }
     
     // Draw azimuth lines (compass directions)
-    // N, E, S, W at 0°, 90°, 180°, 270°
     for (int az = 0; az < 360; az += 45) {
-        float radians = (az - 90) * PI / 180.0;  // -90 to start at North (top)
+        float radians = (az - 90) * PI / 180.0;
         int x2 = cx + maxRadius * cos(radians);
         int y2 = cy + maxRadius * sin(radians);
         
@@ -81,40 +78,78 @@ String generateSkyPlotSVG() {
     }
     
     // Draw cardinal direction labels
-    svg += "<text x='" + String(cx) + "' y='15' font-size='14' font-weight='bold' ";
+    svg += "<text x='" + String(cx) + "' y='115' font-size='14' font-weight='bold' ";
     svg += "fill='#1e293b' text-anchor='middle'>N</text>\n";
     
-    svg += "<text x='385' y='" + String(cy + 5) + "' font-size='14' font-weight='bold' ";
+    svg += "<text x='485' y='" + String(cy + 5) + "' font-size='14' font-weight='bold' ";
     svg += "fill='#1e293b' text-anchor='end'>E</text>\n";
     
     svg += "<text x='" + String(cx) + "' y='395' font-size='14' font-weight='bold' ";
     svg += "fill='#1e293b' text-anchor='middle'>S</text>\n";
     
-    svg += "<text x='15' y='" + String(cy + 5) + "' font-size='14' font-weight='bold' ";
+    svg += "<text x='115' y='" + String(cy + 5) + "' font-size='14' font-weight='bold' ";
     svg += "fill='#1e293b' text-anchor='start'>W</text>\n";
     
     // Group for satellites (populated by JavaScript)
     svg += "<g id='satelliteGroup'></g>\n";
     
-    // Legend
-    int legendY = 360;
-    svg += "<text x='10' y='" + String(legendY) + "' font-size='11' fill='#64748b'>Legend:</text>\n";
+    // ========================================================================
+    // LEGEND - LEFT SIDE, VERTICALLY STACKED
+    // ========================================================================
+    int legendX = 10;
+    int legendStartY = 50;
+    int legendSpacing = 30;
+    
+    // Legend title
+    svg += "<text x='" + String(legendX) + "' y='" + String(legendStartY) + "' ";
+    svg += "font-size='13' font-weight='600' fill='#1e293b'>Constellations</text>\n";
     
     // GPS
-    svg += "<circle cx='15' cy='" + String(legendY + 10) + "' r='4' fill='#3b82f6'/>\n";
-    svg += "<text x='25' y='" + String(legendY + 14) + "' font-size='10' fill='#1e293b'>GPS</text>\n";
+    svg += "<circle cx='" + String(legendX + 5) + "' cy='" + String(legendStartY + legendSpacing) + "' r='5' fill='#3b82f6'/>\n";
+    svg += "<text x='" + String(legendX + 18) + "' y='" + String(legendStartY + legendSpacing + 5) + "' ";
+    svg += "font-size='12' fill='#1e293b'>GPS</text>\n";
     
     // GLONASS
-    svg += "<circle cx='70' cy='" + String(legendY + 10) + "' r='4' fill='#ef4444'/>\n";
-    svg += "<text x='80' y='" + String(legendY + 14) + "' font-size='10' fill='#1e293b'>GLONASS</text>\n";
+    svg += "<circle cx='" + String(legendX + 5) + "' cy='" + String(legendStartY + legendSpacing * 2) + "' r='5' fill='#ef4444'/>\n";
+    svg += "<text x='" + String(legendX + 18) + "' y='" + String(legendStartY + legendSpacing * 2 + 5) + "' ";
+    svg += "font-size='12' fill='#1e293b'>GLONASS</text>\n";
     
     // Galileo
-    svg += "<circle cx='150' cy='" + String(legendY + 10) + "' r='4' fill='#8b5cf6'/>\n";
-    svg += "<text x='160' y='" + String(legendY + 14) + "' font-size='10' fill='#1e293b'>Galileo</text>\n";
+    svg += "<circle cx='" + String(legendX + 5) + "' cy='" + String(legendStartY + legendSpacing * 3) + "' r='5' fill='#8b5cf6'/>\n";
+    svg += "<text x='" + String(legendX + 18) + "' y='" + String(legendStartY + legendSpacing * 3 + 5) + "' ";
+    svg += "font-size='12' fill='#1e293b'>Galileo</text>\n";
     
     // BeiDou
-    svg += "<circle cx='220' cy='" + String(legendY + 10) + "' r='4' fill='#eab308'/>\n";
-    svg += "<text x='230' y='" + String(legendY + 14) + "' font-size='10' fill='#1e293b'>BeiDou</text>\n";
+    svg += "<circle cx='" + String(legendX + 5) + "' cy='" + String(legendStartY + legendSpacing * 4) + "' r='5' fill='#eab308'/>\n";
+    svg += "<text x='" + String(legendX + 18) + "' y='" + String(legendStartY + legendSpacing * 4 + 5) + "' ";
+    svg += "font-size='12' fill='#1e293b'>BeiDou</text>\n";
+    
+    // QZSS
+    svg += "<circle cx='" + String(legendX + 5) + "' cy='" + String(legendStartY + legendSpacing * 5) + "' r='5' fill='#10b981'/>\n";
+    svg += "<text x='" + String(legendX + 18) + "' y='" + String(legendStartY + legendSpacing * 5 + 5) + "' ";
+    svg += "font-size='12' fill='#1e293b'>QZSS</text>\n";
+    
+    // SBAS
+    svg += "<circle cx='" + String(legendX + 5) + "' cy='" + String(legendStartY + legendSpacing * 6) + "' r='5' fill='#f97316'/>\n";
+    svg += "<text x='" + String(legendX + 18) + "' y='" + String(legendStartY + legendSpacing * 6 + 5) + "' ";
+    svg += "font-size='12' fill='#1e293b'>SBAS</text>\n";
+    
+    // Unknown (tracked but not in use)
+    svg += "<circle cx='" + String(legendX + 5) + "' cy='" + String(legendStartY + legendSpacing * 7) + "' r='5' fill='#6b7280'/>\n";
+    svg += "<text x='" + String(legendX + 18) + "' y='" + String(legendStartY + legendSpacing * 7 + 5) + "' ";
+    svg += "font-size='12' fill='#1e293b'>Unknown*</text>\n";
+    
+    // Add explanation note
+    svg += "<text x='" + String(legendX) + "' y='" + String(legendStartY + legendSpacing * 8 + 10) + "' ";
+    svg += "font-size='9' fill='#94a3b8'>*Tracked but not</text>\n";
+    svg += "<text x='" + String(legendX) + "' y='" + String(legendStartY + legendSpacing * 8 + 22) + "' ";
+    svg += "font-size='9' fill='#94a3b8'>used in fix</text>\n";
+    
+    // Add indicator for satellites in use
+    svg += "<circle cx='" + String(legendX + 5) + "' cy='" + String(legendStartY + legendSpacing * 9 + 10) + "' ";
+    svg += "r='6' fill='#3b82f6' stroke='#1e293b' stroke-width='2'/>\n";
+    svg += "<text x='" + String(legendX + 18) + "' y='" + String(legendStartY + legendSpacing * 9 + 15) + "' ";
+    svg += "font-size='10' fill='#1e293b'>In use (bold ring)</text>\n";
     
     svg += "</svg>\n";
     
@@ -133,7 +168,7 @@ String generateSkyPlotJS() {
     js += "  if (!group) return;\n";
     js += "  group.innerHTML = '';\n";
     js += "  \n";
-    js += "  const cx = 200, cy = 200, maxRadius = 180;\n";
+    js += "  const cx = 300, cy = 200, maxRadius = 180;\n";
     js += "  \n";
     js += "  satellites.forEach(sat => {\n";
     js += "    // Convert elevation to radius (90° = center, 0° = edge)\n";
