@@ -1,986 +1,686 @@
-/*
- * ============================================================================
- * NTP.h - Comprehensive NTP Server Library for ESP32
- * ============================================================================
+/**
+ * MQTT Library for ESP32 - HARDENED VERSION with Comprehensive Subscription Support
+ * A robust MQTT client library with automatic reconnection, status management, comprehensive hardening,
+ * and full publish/subscribe functionality
  * 
- * RFC-compliant Stratum 1 NTP server implementation for GPS-disciplined
- * time synchronization. Designed for use with GPS.h library.
+ * UPDATED: Two-Phase Constructor Approach with Setter Support
  * 
  * Features:
- * - RFC 5905 compliant NTP v4 server
- * - Stratum 1 GPS-disciplined time source
- * - Per-client and global rate limiting
- * - Kiss-o'-Death packet support
- * - Broadcast mode for local network
- * - Comprehensive packet validation
- * - Extended metrics and diagnostics
- * - Client poll interval tracking
- * - Root delay/dispersion based on GPS quality
- * - Microsecond timestamp precision
+ * - Two-phase construction: constructor + begin() with configuration
+ * - Individual setter methods for runtime configuration changes
+ * - Automatic connection management with smart reconnection
+ * - Comprehensive input validation and bounds checking
+ * - Enhanced status tracking and diagnostics
+ * - Memory safety and resource protection
+ * - Callback-based status and message notifications
+ * - Support for both WiFi and Ethernet clients
+ * - Retained message support
+ * - Connection state management with health monitoring
+ * - Full MQTT subscription support with wildcard matching
+ * - Message queuing system with overflow protection
+ * - Automatic subscription restoration after reconnection
+ * - MQTT specification compliant wildcard validation
  * 
- * Compatible with: GPS.h library, ESP32, Arduino framework
+ * Usage Patterns:
+ * 1. Config struct: MQTT mqtt(client); mqtt.begin(config);
+ * 2. Setters: MQTT mqtt(client); mqtt.setBroker(...); mqtt.begin();
+ * 3. Runtime changes: mqtt.setBroker(...); mqtt.reconnect();
  * 
- * Dependencies: GPS.h, EthernetUdp.h
+ * Dependencies: PubSubClient
  * 
- * Author: Matthew R. Christensen
- * Version: 1.0
+ * Author: Extracted and refactored from GPS NTP Server project (Hardened + Subscriptions + Two-Phase)
  * License: MIT
- * ============================================================================
  */
 
-#ifndef NTP_H
-#define NTP_H
+#ifndef MQTT_H
+#define MQTT_H
 
 #include <Arduino.h>
-#include "GPS.h"
+#include <PubSubClient.h>
+#include <Client.h>
+#include <vector>
+#include <functional>
 
-#include <EthernetUdp.h>
+// MQTT Connection States (from PubSubClient)
+#define MQTT_CONNECTION_TIMEOUT     -4
+#define MQTT_CONNECTION_LOST        -3
+#define MQTT_CONNECT_FAILED         -2
+#define MQTT_DISCONNECTED           -1
+#define MQTT_CONNECTED               0
+#define MQTT_CONNECT_BAD_PROTOCOL    1
+#define MQTT_CONNECT_BAD_CLIENT_ID   2
+#define MQTT_CONNECT_UNAVAILABLE     3
+#define MQTT_CONNECT_BAD_CREDENTIALS 4
+#define MQTT_CONNECT_UNAUTHORIZED    5
 
-// ============================================================================
-// CONFIGURATION CONSTANTS
-// ============================================================================
+// HARDENING: Safety limits and constraints
+#define MQTT_MAX_BROKER_LENGTH       128    // Maximum broker hostname/IP length
+#define MQTT_MAX_CLIENT_ID_LENGTH    64     // Maximum client ID length
+#define MQTT_MAX_USERNAME_LENGTH     64     // Maximum username length
+#define MQTT_MAX_PASSWORD_LENGTH     128    // Maximum password length
+#define MQTT_MAX_TOPIC_LENGTH        256    // Maximum topic length
+#define MQTT_MAX_BASE_TOPIC_LENGTH   64     // Maximum base topic length
+#define MQTT_MAX_PACKET_SIZE         4096   // Maximum packet size
+#define MQTT_MAX_PAYLOAD_SIZE        4096   // Maximum payload size (conservative)
+#define MQTT_MIN_PORT                1      // Minimum valid port
+#define MQTT_MAX_PORT                65535  // Maximum valid port
+#define MQTT_MIN_KEEP_ALIVE          5      // Minimum keep alive (seconds)
+#define MQTT_MAX_KEEP_ALIVE          300    // Maximum keep alive (5 minutes)
+#define MQTT_MIN_RECONNECT_DELAY     1000   // Minimum reconnect delay (1 second)
+#define MQTT_MAX_RECONNECT_DELAY     300000 // Maximum reconnect delay (5 minutes)
+#define MQTT_MAX_RECONNECT_ATTEMPTS  50     // Maximum reconnect attempts (0 = unlimited)
 
-#define NTP_PACKET_SIZE 48                   // Standard NTP packet size
-#define NTP_PORT 123                         // Standard NTP port
-#define NTP_EPOCH_OFFSET 2208988800UL        // Seconds between 1900 and 1970
-
-// Rate Limiting Defaults
-#define NTP_DEFAULT_CLIENT_INTERVAL 1000     // Min ms between client requests
-#define NTP_DEFAULT_GLOBAL_RATE 1000         // Max requests per second globally
-#define NTP_DEFAULT_MAX_CLIENTS 50           // Maximum tracked clients
-#define NTP_AGGRESSIVE_THRESHOLD 10          // Requests before marking aggressive
-
-// Timeouts and Cleanup
-#define NTP_CLIENT_TIMEOUT 3600000           // Client entry timeout (1 hour)
-#define NTP_BROADCAST_MIN_INTERVAL 10        // Minimum broadcast interval (seconds)
-
-// Quality Thresholds
-#define NTP_MIN_SATELLITES 4                 // Minimum satellites to serve
-#define NTP_MAX_HDOP 10.0                    // Maximum HDOP to serve
-#define NTP_MAX_FIX_AGE 5000                 // Maximum GPS fix age (ms)
-
-// ============================================================================
-// DATA STRUCTURES
-// ============================================================================
+// Subscription-related limits
+#define MQTT_MAX_SUBSCRIPTIONS       20     // Maximum number of concurrent subscriptions
+#define MQTT_MAX_TOPIC_FILTER_LENGTH 256    // Maximum topic filter length (with wildcards)
+#define MQTT_MAX_MESSAGE_QUEUE_SIZE  100    // Maximum queued messages
+#define MQTT_MIN_SUBSCRIPTION_TIMEOUT 1000  // Minimum subscription timeout (1 second)
+#define MQTT_MAX_SUBSCRIPTION_TIMEOUT 60000 // Maximum subscription timeout (1 minute)
 
 /**
- * NTP Configuration
- * Settings for NTP server operation
+ * MQTT Configuration Structure - HARDENED + SUBSCRIPTIONS
+ * User creates and manages this configuration with validation
+ * NOTE: With two-phase approach, this is now optional - can use setters instead
  */
-struct NTPConfig {
-    bool enabled;                            // NTP server enabled
-    uint16_t port;                           // UDP port (default 123)
+struct MQTTConfig {
+    // Connection settings
+    bool enabled = false;
+    String broker = "";
+    uint16_t port = 1883;
+    String username = "";
+    String password = "";
+    String clientId = "";
+    String baseTopic = "";
+    uint16_t keepAlive = 60;        // Keep alive interval in seconds
+    bool cleanSession = true;       // Clean session flag
+    uint32_t reconnectDelay = 5000; // Reconnect delay in milliseconds
+    uint8_t maxReconnectAttempts = 10; // 0 = unlimited (but capped by hardening)
     
-    // Rate Limiting
-    bool rateLimitEnabled;                   // Enable per-client rate limiting
-    uint32_t perClientMinInterval;           // Min ms between client requests
-    uint32_t globalMaxRequestsPerSec;        // Max requests/sec globally
-    uint16_t maxClients;                     // Maximum tracked clients
+    // Subscription settings
+    uint16_t maxSubscriptions = 10;             // Maximum concurrent subscriptions
+    uint32_t subscriptionTimeout = 5000;       // Subscription operation timeout
+    bool enableMessageQueue = true;             // Enable message queuing
+    uint16_t messageQueueSize = 20;             // Maximum queued messages
+    uint16_t maxTopicFilterLength = 256;        // Maximum topic filter length
+    bool autoResubscribe = true;                // Auto-resubscribe after reconnection
     
-    // Broadcast Mode
-    bool broadcastEnabled;                   // Enable NTP broadcast
-    uint16_t broadcastInterval;              // Broadcast interval (seconds)
-    bool autoBroadcast;                      // Auto-broadcast in process()
-    
-    // Server Identity
-    uint8_t stratum;                         // NTP stratum (normally 1)
-    char referenceID[5];                     // Reference ID (e.g., "GPS")
-    
-    // Quality Thresholds
-    uint8_t minSatellites;                   // Min satellites to respond
-    float maxHDOP;                           // Max HDOP to respond
-    uint32_t maxFixAge;                      // Max GPS fix age to respond (ms)
+    // HARDENING: Validation methods
+    bool isValid() const;
+    String getValidationError() const;
 };
 
 /**
- * NTP Client Tracking
- * Per-client rate limiting and statistics
+ * MQTT Subscription Structure
+ * Tracks individual subscription state and statistics
  */
-struct NTPClient {
-    IPAddress ip;                            // Client IP address
-    uint32_t lastRequest;                    // Last request timestamp
-    uint32_t requestCount;                   // Total requests
-    uint8_t lastPollInterval;                // Last poll interval from packet
-    uint32_t averageInterval;                // Calculated average interval
-    uint16_t aggressiveCount;                // Count of too-frequent requests
-    bool aggressive;                         // Flagged as aggressive
-    bool rateLimited;                        // Currently rate limited
-    uint8_t version;                         // NTP version used
+struct MQTTSubscription {
+    String topicFilter = "";        // Topic filter (may contain wildcards)
+    uint8_t qos = 0;               // Quality of Service level (0, 1, or 2)
+    bool active = false;           // Currently subscribed and active
+    uint32_t subscribeTime = 0;    // When subscription was established
+    uint32_t lastMessageTime = 0;  // When last message was received
+    uint32_t messageCount = 0;     // Total messages received on this subscription
+    uint16_t subscriptionAttempts = 0; // Number of subscription attempts
+    int lastError = 0;             // Last error code for this subscription
+    String lastErrorMessage = "";  // Last error message for this subscription
+    
+    // Constructors
+    MQTTSubscription();
+    MQTTSubscription(const String& topic, uint8_t qosLevel = 0);
+    
+    // Validation
+    bool isValid() const;
+    String getValidationError() const;
 };
 
 /**
- * NTP Server Metrics
- * Performance and usage statistics
+ * MQTT Message Structure
+ * For message queuing system
  */
-struct NTPMetrics {
-    // Request Counters
-    uint32_t totalRequests;                  // Total NTP requests received
-    uint32_t validResponses;                 // Valid responses sent
-    uint32_t invalidRequests;                // Invalid/malformed requests
-    uint32_t rateLimitedRequests;            // Rate limited (dropped)
-    uint32_t kodSent;                        // Kiss-o'-Death packets sent
-    uint32_t noGPSDropped;                   // Dropped due to no GPS fix
-    uint32_t poorQualityDropped;             // Dropped due to poor GPS quality
-    
-    // Broadcast
-    uint32_t broadcastsSent;                 // Broadcast packets sent
-    
-    // Performance
-    float averageResponseTime;               // Average response time (ms)
-    uint32_t peakResponseTime;               // Peak response time (ms)
-    uint32_t lastRequestTime;                // Last request timestamp
-    
-    // Client Statistics
-    uint32_t uniqueClients;                  // Count of unique clients
-    uint8_t clientVersions[5];               // Count by version (v1-v4, other)
-    uint32_t requestsByStratum[17];          // Requests by client stratum
-    
-    // Current State
-    bool currentlyServing;                   // Currently serving NTP
-    uint32_t servingStartTime;               // When we started serving
-    uint32_t lastServingStopTime;            // When we last stopped serving
+struct MQTTMessage {
+    String topic = "";             // Message topic
+    String payload = "";           // Message payload
+    uint32_t receivedTime = 0;     // When message was received
+    bool processed = false;        // Whether message has been processed
 };
 
 /**
- * Global Rate Limiting
- * Protect against DDoS attacks
+ * MQTT Status/State Information - ENHANCED WITH SUBSCRIPTIONS
+ * Read-only access to internal state with comprehensive diagnostics
  */
-struct GlobalRateLimit {
-    uint32_t requestsThisSecond;             // Requests in current second
-    uint32_t lastSecondReset;                // Last counter reset time
-    uint32_t droppedThisSecond;              // Dropped due to rate limit
+struct MQTTStatus {
+    // Connection state
+    bool connected = false;
+    int lastError = MQTT_DISCONNECTED;
+    uint32_t reconnectCount = 0;
+    uint32_t lastConnectAttempt = 0;
+    uint32_t lastSuccessfulConnect = 0;
+    uint32_t connectionUptime = 0;          // Time connected in current session
+    
+    // Operation statistics
+    uint32_t publishCount = 0;
+    uint32_t publishFailCount = 0;
+    uint32_t totalConnectAttempts = 0;
+    uint32_t totalSuccessfulConnects = 0;
+    
+    // HARDENING: Enhanced diagnostics
+    uint32_t consecutiveFailures = 0;       // Consecutive connection failures
+    uint32_t networkErrors = 0;             // Network-level errors
+    uint32_t protocolErrors = 0;            // MQTT protocol errors
+    uint32_t authenticationErrors = 0;      // Authentication failures
+    uint32_t payloadRejections = 0;         // Payloads rejected due to size
+    String lastErrorMessage = "";           // Human-readable last error
+    uint32_t lastErrorTime = 0;             // When last error occurred
+    
+    // Performance metrics
+    uint32_t averageConnectTime = 0;        // Average time to connect (ms)
+    uint32_t longestConnection = 0;         // Longest successful connection (ms)
+    float connectionReliability = 0.0;      // Success rate (0.0-1.0)
+    
+    // Subscription statistics
+    uint16_t activeSubscriptions = 0;       // Currently active subscriptions
+    uint16_t totalSubscriptions = 0;        // Total subscriptions ever created
+    uint32_t subscriptionFailures = 0;      // Total subscription failures
+    uint32_t totalMessagesReceived = 0;     // Total messages received
+    uint32_t messagesDropped = 0;           // Messages dropped (queue full, etc.)
+    String lastReceivedTopic = "";          // Last topic that received a message
+    uint32_t lastMessageTime = 0;           // When last message was received
+    float subscriptionReliability = 0.0;    // Subscription success rate (0.0-1.0)
+    float averageMessageRate = 0.0;         // Average messages per second
+    uint16_t queuedMessages = 0;            // Currently queued messages
 };
 
 /**
- * NTP Timestamp
- * NTP timestamp in seconds and fraction
+ * MQTT Health Status - ENHANCED
+ * Overall health assessment of MQTT connection and subscriptions
  */
-struct NTPTimestamp {
-    uint32_t seconds;                        // Seconds since 1900
-    uint32_t fraction;                       // Fractional seconds (2^-32)
+enum class MQTTHealthStatus {
+    Healthy,            // All good - connection and subscriptions working
+    Degraded,           // Some issues but functional
+    Unstable,           // Frequent reconnections or subscription failures
+    Failed              // Unable to maintain connection or critical failures
 };
 
-// ============================================================================
-// NTP CLASS
-// ============================================================================
+// Enhanced callback function types
+typedef std::function<void(bool connected, int errorCode)> MQTTStatusCallback;
+typedef std::function<void(const String& topic, bool success)> MQTTPublishCallback;
+typedef std::function<void(MQTTHealthStatus oldStatus, MQTTHealthStatus newStatus)> MQTTHealthCallback;
 
-class NTP {
+// Subscription-related callbacks
+typedef std::function<void(const String& topic, const String& payload)> MQTTMessageCallback;
+typedef std::function<void(const String& topicFilter, bool subscribed, bool success)> MQTTSubscriptionCallback;
+
+// Forward declaration
+class MQTT;
+
+/**
+ * Enhanced MQTT Class with Comprehensive Subscription Support and Two-Phase Construction
+ */
+class MQTT {
 public:
+    /**
+     * Two-Phase Constructor - Phase 1
+     * @param client Network client (WiFiClient, EthernetClient, etc.)
+     * NOTE: Sets reasonable defaults, object is safe but needs configuration
+     */
+    MQTT(Client& client);
+    
+    /**
+     * Two-Phase Constructor - Phase 2 (Configuration)
+     * Must be called before using MQTT functionality
+     * @param config Optional MQTT configuration (if not provided, uses internal config set via setters)
+     * @return true if initialization successful, false if config invalid
+     */
+    bool begin();
+    bool begin(const MQTTConfig& config);
+    
     // ========================================================================
-    // PUBLIC API
+    // NEW: Configuration Setter Methods
+    // All setters validate input and return success/failure
+    // Changes take effect after reconnect() is called
     // ========================================================================
     
     /**
-     * Initialize NTP server
-     * @param gps GPS instance reference
-     * @param udp UDP socket reference
-     * @param config NTP configuration
+     * Core connection settings
      */
-    void begin(GPS& gps, EthernetUDP& udp, const NTPConfig& config);
+    bool setBroker(const String& broker, uint16_t port = 1883);
+    bool setCredentials(const String& username, const String& password = "");
+    bool setClientId(const String& clientId);
+    bool setKeepAlive(uint16_t seconds);
+    bool setCleanSession(bool clean);
     
     /**
-     * Initialize with default configuration
+     * Advanced connection settings
      */
-    void begin(GPS& gps, EthernetUDP& udp);
+    bool setReconnectDelay(uint32_t delayMs);
+    bool setMaxReconnectAttempts(uint8_t attempts);
+    bool setBaseTopic(const String& baseTopic);
     
     /**
-     * Main processing loop - call in main loop()
-     * Handles NTP requests and automatic broadcasting
+     * Subscription settings
      */
-    void process();
+    bool setMaxSubscriptions(uint16_t maxSubs);
+    bool setSubscriptionTimeout(uint32_t timeoutMs);
+    bool setMessageQueueSize(uint16_t size);
+    bool enableMessageQueue(bool enable);
+    bool setAutoResubscribe(bool enable);
     
     /**
-     * Send NTP broadcast packet
-     * Can be called manually or automatically via process()
+     * General settings
      */
-    void sendBroadcast();
+    void setEnabled(bool enabled);  // Simple flag, no validation needed
     
     /**
-     * Update configuration at runtime
-     * @param config New configuration
+     * Configuration management
      */
-    void updateConfig(const NTPConfig& config);
+    void resetConfigToDefaults();
+    MQTTConfig getConfig() const;           // Get current config for inspection
+    bool isConfigurationValid() const;     // Check if current config is valid
+    String getConfigurationError() const;  // Get validation error if any
+    
+    // ========================================================================
+    // Existing Core Methods (unchanged API)
+    // ========================================================================
     
     /**
-     * Update rate limit settings
-     * @param perClientMs Minimum ms between requests per client
-     * @param globalPerSec Maximum requests per second globally
+     * Main loop function - call from Arduino loop()
+     * Handles connection management, reconnection, health monitoring, and message processing
      */
-    void setRateLimits(uint32_t perClientMs, uint32_t globalPerSec);
+    void loop();
     
     /**
-     * Get current metrics
-     * @return Reference to metrics structure
+     * Attempt to connect to MQTT broker with enhanced error handling
+     * @return true if connection successful
      */
-    const NTPMetrics& getMetrics() const { return metrics; }
+    bool connect();
     
     /**
-     * Check if NTP server is currently serving
-     * @return True if GPS quality is sufficient to serve NTP
+     * Disconnect from MQTT broker with proper cleanup
      */
-    bool isServing() const;
+    void disconnect();
     
     /**
-     * Get human-readable status string
-     * @return Status description
+     * Force reconnection (applies any config changes made via setters)
+     * @return true if reconnection successful
      */
-    String getStatusString() const;
+    bool reconnect();
+    
+    // ========================================================================
+    // Publishing Methods (unchanged)
+    // ========================================================================
     
     /**
-     * Cleanup stale client entries
-     * Called automatically, but can be called manually for immediate cleanup
+     * Publish a message with validation and safety checks
+     * @param topic Topic to publish to (user handles prefixing)
+     * @param payload Message payload (will be validated for size)
+     * @param retained Whether message should be retained
+     * @return true if publish successful
      */
-    void cleanupStaleClients();
+    bool publish(const String& topic, const String& payload, bool retained = false);
+
+    // ========================================================================
+    // Subscription Methods (unchanged API)
+    // ========================================================================
     
     /**
-     * Reset metrics counters
+     * Subscribe to a topic with comprehensive validation
+     * @param topicFilter Topic filter (may contain + and # wildcards)
+     * @param qos Quality of Service level (0, 1, or 2)
+     * @return true if subscription successful
      */
-    void resetMetrics();
+    bool subscribe(const String& topicFilter, uint8_t qos = 0);
     
     /**
-     * Set optional logging callback
-     * @param callback Function pointer: void logFunc(String message)
+     * Unsubscribe from a topic
+     * @param topicFilter Topic filter to unsubscribe from
+     * @return true if unsubscribe successful
      */
-    void setLogCallback(void (*callback)(String));
+    bool unsubscribe(const String& topicFilter);
     
     /**
-     * Get default configuration
-     * @return Default NTPConfig structure
+     * Check if subscribed to a specific topic filter
+     * @param topicFilter Topic filter to check
+     * @return true if currently subscribed and active
      */
-    static NTPConfig getDefaultConfig();
+    bool isSubscribed(const String& topicFilter) const;
+    
+    /**
+     * Get list of all subscriptions (returns copy for safety)
+     * @return Vector of all subscription objects
+     */
+    std::vector<MQTTSubscription> getSubscriptions() const;
+    
+    /**
+     * Get subscription information for a specific topic filter
+     * @param topicFilter Topic filter to look up
+     * @param subscription Output parameter for subscription data
+     * @return true if subscription found
+     */
+    bool getSubscription(const String& topicFilter, MQTTSubscription& subscription) const;
+    
+    /**
+     * Get count of active subscriptions
+     * @return Number of currently active subscriptions
+     */
+    uint16_t getActiveSubscriptionCount() const;
+    
+    /**
+     * Get total subscription count (including inactive)
+     * @return Total number of subscriptions
+     */
+    uint16_t getTotalSubscriptionCount() const;
+    
+    /**
+     * Clear all subscriptions (for testing/reset)
+     */
+    void clearAllSubscriptions();
+    
+    /**
+     * Get subscription statistics summary
+     * @return Human-readable subscription summary
+     */
+    String getSubscriptionSummary() const;
+    
+    // ========================================================================
+    // Status and Health Methods (unchanged API)
+    // ========================================================================
+    
+    /**
+     * Get current connection status
+     * @return true if connected to broker
+     */
+    bool isConnected() const;
+    
+    /**
+     * Get detailed status information
+     * @return MQTTStatus struct with current state and statistics
+     */
+    MQTTStatus getStatus() const;
+    
+    /**
+     * Get overall health assessment
+     * @return Current health status
+     */
+    MQTTHealthStatus getHealthStatus() const;
+    
+    /**
+     * Get human-readable description of MQTT state
+     * @param state MQTT state code
+     * @return Description string
+     */
+    static String getStateDescription(int state);
+    
+    /**
+     * Get human-readable description of health status
+     * @param health Health status
+     * @return Description string
+     */
+    static String getHealthDescription(MQTTHealthStatus health);
+    
+    /**
+     * Reset statistics and error counters
+     */
+    void resetStatistics();
+    
+    /**
+     * Force health status recalculation
+     * @return Current health status after recalculation
+     */
+    MQTTHealthStatus recalculateHealth();
+    
+    /**
+     * Get detailed diagnostic information
+     * @return Multi-line string with comprehensive diagnostics
+     */
+    String getDiagnostics() const;
+
+    // ========================================================================
+    // Callback Management (unchanged API)
+    // ========================================================================
+    
+    /**
+     * Set status change callback
+     * Called when connection status changes
+     * @param callback Function to call on status change
+     */
+    void onStatusChange(MQTTStatusCallback callback);
+    
+    /**
+     * Set publish result callback
+     * Called after each publish attempt
+     * @param callback Function to call after publish
+     */
+    void onPublishResult(MQTTPublishCallback callback);
+    
+    /**
+     * Set health change callback
+     * Called when overall health status changes
+     * @param callback Function to call on health change
+     */
+    void onHealthChange(MQTTHealthCallback callback);
+    
+    /**
+     * Set message received callback
+     * Called when a message is received on any subscribed topic
+     * @param callback Function to call when message received
+     */
+    void onMessageReceived(MQTTMessageCallback callback);
+    
+    /**
+     * Set subscription status callback
+     * Called when subscription status changes
+     * @param callback Function to call on subscription changes
+     */
+    void onSubscriptionChange(MQTTSubscriptionCallback callback);
+    
+    // ========================================================================
+    // Configuration and Management Methods (updated for two-phase)
+    // ========================================================================
+    
+    /**
+     * Update configuration with validation (UPDATED - now optional parameter)
+     * Will disconnect and reconnect if currently connected
+     * @param newConfig New configuration to use (optional - uses internal config if not provided)
+     * @return true if config is valid and was applied
+     */
+    bool updateConfig(const MQTTConfig& newConfig);
+    bool updateConfig(); // Use current internal config
+    
+    // ========================================================================
+    // HARDENING: Validation and Utility Methods (unchanged API)
+    // ========================================================================
+    
+    /**
+     * Get configuration validation errors
+     * @param config Configuration to validate
+     * @return Empty string if valid, error message if invalid
+     */
+    static String validateConfig(const MQTTConfig& config);
+    
+    /**
+     * Get configuration validation summary
+     * @param config Configuration to validate
+     * @return Human-readable validation summary
+     */
+    static String getValidationSummary(const MQTTConfig& config);
+    
+    /**
+     * Get buffer size information from PubSubClient
+     * @return Buffer size in bytes
+     */
+    uint16_t getBufferSize() const;
+    
+    /**
+     * Check if a payload would fit in the MQTT buffer
+     * @param topic Topic for the message
+     * @param payload Payload to check
+     * @return true if message would fit
+     */
+    bool wouldPayloadFit(const String& topic, const String& payload) const;
+    
+    /**
+     * Check if a subscription would fit in the MQTT buffer
+     * @param topicFilter Topic filter to check
+     * @return true if subscription would fit
+     */
+    bool wouldSubscriptionFit(const String& topicFilter) const;
+    
+    /**
+     * Get detailed configuration summary
+     * @return Human-readable configuration summary
+     */
+    String getConfigSummary() const;
+    
+    /**
+     * Get performance summary
+     * @return Human-readable performance summary
+     */
+    String getPerformanceSummary() const;
+    
+    /**
+     * Check if broker settings appear to be for Home Assistant
+     * @return true if configuration suggests Home Assistant broker
+     */
+    bool isHomeAssistantBroker() const;
+    
+    /**
+     * Get recommended topic prefix for Home Assistant
+     * @return Recommended topic prefix
+     */
+    String getHomeAssistantTopicPrefix() const;
+    
+    /**
+     * Test broker connectivity without full connection
+     * @return true if broker is reachable
+     */
+    bool testBrokerConnectivity();
+    
+    /**
+     * Get time since last successful operation
+     * @return Milliseconds since last success, or UINT32_MAX if never connected
+     */
+    uint32_t getTimeSinceLastSuccess() const;
+    
+    /**
+     * Get formatted uptime string
+     * @return Human-readable uptime string
+     */
+    String getUptimeString() const;
+    
+    /**
+     * Export status as JSON string for web interfaces
+     * @return JSON representation of current status
+     */
+    String getStatusJSON() const;
+    
+    /**
+     * Print comprehensive status to Serial (for debugging)
+     */
+    void printStatus() const;
+    
+    // ========================================================================
+    // Testing and Debug Methods (unchanged API)
+    // ========================================================================
+    
+    /**
+     * Simulate various error conditions for testing
+     * @param errorCode Error code to simulate
+     */
+    void simulateError(int errorCode);
+    
+    /**
+     * Force immediate reconnection attempt (for testing)
+     * @return true if reconnection successful
+     */
+    bool forceReconnect();
+    
+    /**
+     * Get system memory usage estimate
+     * @return Estimated memory usage in bytes
+     */
+    size_t getMemoryUsage() const;
+    
+    /**
+     * Check if configuration has changed
+     * @param newConfig Configuration to compare against current
+     * @return true if configuration differs
+     */
+    bool hasConfigChanged(const MQTTConfig& newConfig) const;
 
 private:
+    Client& _client;
+    // REMOVED: const MQTTConfig& _config; (no longer using reference to external config)
+    MQTTConfig _validatedConfig;           // Internal configuration storage
+    PubSubClient _mqttClient;
+    MQTTStatus _status;
+    MQTTHealthStatus _healthStatus;
+    
+    // Enhanced state tracking
+    uint32_t _connectionStartTime;         // When current connection attempt started
+    uint32_t _sessionStartTime;           // When current session started
+    uint32_t _lastHealthCheck;            // Last health status check
+    uint32_t _healthCheckInterval;        // How often to check health
+    
+    // Subscription management
+    std::vector<MQTTSubscription> _subscriptions;   // Active subscriptions
+    std::vector<MQTTMessage> _messageQueue;         // Message queue (if enabled)
+    uint32_t _lastSubscriptionCleanup;              // Last subscription maintenance
+    uint32_t _subscriptionCleanupInterval;          // Subscription maintenance interval
+    uint32_t _messageRateWindow;                    // Message rate calculation window
+    uint32_t _messagesInWindow;                     // Messages in current window
+    
+    // Callbacks
+    MQTTStatusCallback _statusCallback;
+    MQTTPublishCallback _publishCallback;
+    MQTTHealthCallback _healthCallback;
+    MQTTMessageCallback _messageCallback;
+    MQTTSubscriptionCallback _subscriptionCallback;
+    
     // ========================================================================
-    // INTERNAL STATE
+    // Private Methods - Core Functionality
     // ========================================================================
     
-    GPS* gpsRef;                             // GPS instance reference
-    EthernetUDP* udpRef;                     // UDP socket reference
-    NTPConfig config;                        // Current configuration
+    // NEW: Internal configuration management
+    void _setDefaultConfig();  // Set reasonable defaults in constructor
+    bool _initializeWithConfig(const MQTTConfig& config);
     
-    NTPMetrics metrics;                      // Server metrics
-    GlobalRateLimit globalRateLimit;         // Global rate limiter
+    // Configuration and validation
+    bool _validateAndCopyConfig(const MQTTConfig& config);
+    bool _isTopicValid(const String& topic) const;
+    bool _isTopicFilterValid(const String& topicFilter) const;
+    bool _isPayloadValid(const String& payload) const;
+    bool _validateWildcardUsage(const String& topicFilter) const;
     
-    NTPClient* clients;                      // Dynamic client array
-    int clientCount;                         // Current client count
+    // Connection and health management
+    void _updateConnectionMetrics(bool success);
+    void _updateHealthStatus();
+    void _categorizeError(int errorCode);
+    bool _shouldAttemptReconnect();
+    void _resetReconnectCount();
+    String _getErrorCategory(int errorCode) const;
     
-    byte packetBuffer[NTP_PACKET_SIZE];      // Packet buffer
-    uint32_t lastBroadcast;                  // Last broadcast time
-    uint32_t lastCleanup;                    // Last cleanup time
+    // Subscription management
+    bool _resubscribeAll();
+    void _unsubscribeAll();
+    void _onMessageReceived(char* topic, byte* payload, unsigned int length);
+    void _processMessageQueue();
+    void _performSubscriptionMaintenance();
+    void _handleSubscriptionConfigChange();
     
-    void (*logCallback)(String) = nullptr;   // Optional logging
+    // Subscription helpers
+    int _findSubscriptionIndex(const String& topicFilter) const;
+    int _findSubscriptionForTopic(const String& topic) const;
+    bool _topicMatches(const String& filter, const String& topic) const;
+    bool _simpleWildcardMatch(const String& pattern, const String& topic) const;
+    void _updateSubscriptionCounts();
+    void _updateMessageRate();
     
-    // ========================================================================
-    // INTERNAL METHODS
-    // ========================================================================
-    
-    // Request Handling
-    void handleNTPRequests();
-    bool validateNTPRequest(const byte* packet);
-    void sendNTPResponse(IPAddress clientIP, int port, const byte* request, 
-                        uint32_t receiveTimeMicros);
-    void buildNTPPacket(byte* packet, const byte* request, 
-                       uint32_t receiveTimeMicros, uint32_t transmitTimeMicros);
-    
-    // Kiss-o'-Death
-    void sendKissOfDeath(IPAddress clientIP, int port, const char* kissCode);
-    
-    // Rate Limiting
-    bool checkGlobalRateLimit();
-    bool checkClientRateLimit(IPAddress clientIP, uint8_t pollInterval);
-    NTPClient* findOrCreateClient(IPAddress clientIP);
-    void updateClientStats(NTPClient* client, uint8_t pollInterval);
-    
-    // GPS Quality Checks
-    bool isGPSQualitySufficient() const;
-    void calculateRootDelayDispersion(float& rootDelay, float& rootDispersion) const;
-    
-    // Timestamp Conversion
-    NTPTimestamp gpsTimeToNTP() const;
-    NTPTimestamp microsToNTP(uint32_t micros) const;
-    uint32_t getCurrentMicros() const;
-    
-    // Packet Building Helpers
-    void writeNTPTimestamp(byte* packet, int offset, const NTPTimestamp& ts);
-    uint8_t extractPollInterval(const byte* packet);
-    uint8_t extractVersion(const byte* packet);
-    uint8_t extractStratum(const byte* packet);
-    
-    // Utilities
-    void log(const String& message);
-    void updateMetricsState();
+    // Callback notifications with safety
+    void _notifyStatusChange(bool connected, int errorCode);
+    void _notifyPublishResult(const String& topic, bool success);
+    void _notifyHealthChange(MQTTHealthStatus newStatus);
+    void _notifyMessageReceived(const String& topic, const String& payload);
+    void _notifySubscriptionChange(const String& topicFilter, bool subscribed, bool success);
 };
 
-// ============================================================================
-// IMPLEMENTATION
-// ============================================================================
-
-NTPConfig NTP::getDefaultConfig() {
-    NTPConfig config;
-    config.enabled = true;
-    config.port = NTP_PORT;
-    
-    config.rateLimitEnabled = true;
-    config.perClientMinInterval = NTP_DEFAULT_CLIENT_INTERVAL;
-    config.globalMaxRequestsPerSec = NTP_DEFAULT_GLOBAL_RATE;
-    config.maxClients = NTP_DEFAULT_MAX_CLIENTS;
-    
-    config.broadcastEnabled = false;
-    config.broadcastInterval = 64;
-    config.autoBroadcast = true;
-    
-    config.stratum = 1;
-    strcpy(config.referenceID, "GPS");
-    
-    config.minSatellites = NTP_MIN_SATELLITES;
-    config.maxHDOP = NTP_MAX_HDOP;
-    config.maxFixAge = NTP_MAX_FIX_AGE;
-    
-    return config;
-}
-
-void NTP::begin(GPS& gps, EthernetUDP& udp, const NTPConfig& cfg) {
-    log("NTP: Initializing NTP server...");
-    
-    gpsRef = &gps;
-    udpRef = &udp;
-    config = cfg;
-    
-    // Allocate client tracking array
-    clients = new NTPClient[config.maxClients];
-    clientCount = 0;
-    
-    // Initialize metrics
-    memset(&metrics, 0, sizeof(NTPMetrics));
-    
-    // Initialize global rate limiter
-    globalRateLimit.requestsThisSecond = 0;
-    globalRateLimit.lastSecondReset = millis();
-    globalRateLimit.droppedThisSecond = 0;
-    
-    // Initialize timestamps
-    lastBroadcast = 0;
-    lastCleanup = 0;
-    
-    // Start UDP
-    if (config.enabled) {
-        udpRef->begin(config.port);
-        log("NTP: Server started on port " + String(config.port));
-    }
-    
-    log("NTP: Initialization complete");
-    log("NTP: Stratum " + String(config.stratum) + 
-        ", Reference ID: " + String(config.referenceID));
-}
-
-void NTP::begin(GPS& gps, EthernetUDP& udp) {
-    begin(gps, udp, getDefaultConfig());
-}
-
-void NTP::process() {
-    if (!config.enabled) return;
-    
-    // Handle incoming NTP requests
-    handleNTPRequests();
-    
-    // Auto-broadcast if enabled
-    if (config.broadcastEnabled && config.autoBroadcast) {
-        if (millis() - lastBroadcast > (config.broadcastInterval * 1000)) {
-            sendBroadcast();
-        }
-    }
-    
-    // Periodic cleanup (every 5 minutes)
-    if (millis() - lastCleanup > 300000) {
-        cleanupStaleClients();
-        lastCleanup = millis();
-    }
-    
-    // Update metrics state
-    updateMetricsState();
-}
-
-void NTP::handleNTPRequests() {
-    int packetSize = udpRef->parsePacket();
-    
-    if (packetSize != NTP_PACKET_SIZE) {
-        if (packetSize > 0) {
-            metrics.invalidRequests++;
-        }
-        return;
-    }
-    
-    // CRITICAL: Capture receive time immediately for accuracy
-    uint32_t receiveTimeMicros = micros();
-    
-    IPAddress clientIP = udpRef->remoteIP();
-    int clientPort = udpRef->remotePort();
-    
-    // Read packet
-    udpRef->read(packetBuffer, NTP_PACKET_SIZE);
-    
-    // Check global rate limit first (DDoS protection)
-    if (!checkGlobalRateLimit()) {
-        metrics.rateLimitedRequests++;
-        globalRateLimit.droppedThisSecond++;
-        return;
-    }
-    
-    // Validate packet format
-    if (!validateNTPRequest(packetBuffer)) {
-        metrics.invalidRequests++;
-        return;
-    }
-    
-    // Check GPS quality
-    if (!isGPSQualitySufficient()) {
-        metrics.noGPSDropped++;
-        // Send Kiss-o'-Death to inform client
-        sendKissOfDeath(clientIP, clientPort, "DENY");
-        return;
-    }
-    
-    // Extract poll interval for rate limiting
-    uint8_t pollInterval = extractPollInterval(packetBuffer);
-    
-    // Check per-client rate limit
-    if (config.rateLimitEnabled && !checkClientRateLimit(clientIP, pollInterval)) {
-        metrics.rateLimitedRequests++;
-        sendKissOfDeath(clientIP, clientPort, "RATE");
-        return;
-    }
-    
-    // Record request start time for metrics
-    uint32_t requestStart = millis();
-    
-    // Send NTP response
-    uint32_t transmitTimeMicros = micros();
-    sendNTPResponse(clientIP, clientPort, packetBuffer, receiveTimeMicros);
-    
-    // Update metrics
-    metrics.totalRequests++;
-    metrics.validResponses++;
-    metrics.lastRequestTime = millis();
-    
-    uint32_t responseTime = millis() - requestStart;
-    if (responseTime > metrics.peakResponseTime) {
-        metrics.peakResponseTime = responseTime;
-    }
-    
-    if (metrics.averageResponseTime == 0) {
-        metrics.averageResponseTime = responseTime;
-    } else {
-        metrics.averageResponseTime = (metrics.averageResponseTime * 0.9) + (responseTime * 0.1);
-    }
-    
-    // Update client version statistics
-    uint8_t version = extractVersion(packetBuffer);
-    if (version >= 1 && version <= 4) {
-        metrics.clientVersions[version - 1]++;
-    } else {
-        metrics.clientVersions[4]++;  // "other"
-    }
-    
-    // Update stratum statistics
-    uint8_t clientStratum = extractStratum(packetBuffer);
-    if (clientStratum <= 16) {
-        metrics.requestsByStratum[clientStratum]++;
-    }
-}
-
-bool NTP::validateNTPRequest(const byte* packet) {
-    // Check version (3 or 4)
-    uint8_t version = extractVersion(packet);
-    if (version < 3 || version > 4) {
-        log("NTP: Invalid version: " + String(version));
-        return false;
-    }
-    
-    // Check mode (must be 3 = client)
-    uint8_t mode = packet[0] & 0x07;
-    if (mode != 3) {
-        log("NTP: Invalid mode: " + String(mode));
-        return false;
-    }
-    
-    // Check stratum (0 = KoD/unspecified, 1-15 = valid, 16 = unsync)
-    uint8_t stratum = packet[1];
-    if (stratum > 16) {
-        log("NTP: Invalid stratum: " + String(stratum));
-        return false;
-    }
-    
-    // Originate timestamp should not be zero (except for first request)
-    bool hasOriginateTime = false;
-    for (int i = 24; i < 32; i++) {
-        if (packet[i] != 0) {
-            hasOriginateTime = true;
-            break;
-        }
-    }
-    
-    // We'll allow zero originate for initial sync
-    // Real NTP clients will have non-zero on subsequent requests
-    
-    return true;
-}
-
-void NTP::sendNTPResponse(IPAddress clientIP, int port, const byte* request, 
-                         uint32_t receiveTimeMicros) {
-    // Capture transmit time
-    uint32_t transmitTimeMicros = micros();
-    
-    // Build response packet
-    buildNTPPacket(packetBuffer, request, receiveTimeMicros, transmitTimeMicros);
-    
-    // Send response
-    udpRef->beginPacket(clientIP, port);
-    udpRef->write(packetBuffer, NTP_PACKET_SIZE);
-    udpRef->endPacket();
-}
-
-void NTP::buildNTPPacket(byte* packet, const byte* request, 
-                        uint32_t receiveTimeMicros, uint32_t transmitTimeMicros) {
-    const GPSData& gpsData = gpsRef->getData();
-    
-    // Clear packet
-    memset(packet, 0, NTP_PACKET_SIZE);
-    
-    // Byte 0: Leap Indicator (2 bits) + Version (3 bits) + Mode (3 bits)
-    uint8_t leapIndicator = 0;  // 0 = no warning (we'll add leap second support later)
-    
-    // Set leap indicator to alarm if GPS quality is marginal
-    if (!gpsData.timeValid || gpsData.updateAge > 2000) {
-        leapIndicator = 3;  // Alarm condition (clock not synchronized)
-    }
-    
-    uint8_t version = extractVersion(request);  // Echo client version
-    uint8_t mode = 4;  // Server mode
-    
-    packet[0] = (leapIndicator << 6) | (version << 3) | mode;
-    
-    // Byte 1: Stratum
-    packet[1] = config.stratum;
-    
-    // Byte 2: Poll interval (echo client's poll or use 6 = 64 seconds)
-    packet[2] = extractPollInterval(request);
-    
-    // Byte 3: Precision (-20 = ~1 microsecond)
-    packet[3] = 0xEC;  // -20 in two's complement
-    
-    // Bytes 4-7: Root Delay
-    float rootDelaySeconds, rootDispersionSeconds;
-    calculateRootDelayDispersion(rootDelaySeconds, rootDispersionSeconds);
-    
-    uint32_t rootDelay = (uint32_t)(rootDelaySeconds * 65536.0);
-    packet[4] = (rootDelay >> 24) & 0xFF;
-    packet[5] = (rootDelay >> 16) & 0xFF;
-    packet[6] = (rootDelay >> 8) & 0xFF;
-    packet[7] = rootDelay & 0xFF;
-    
-    // Bytes 8-11: Root Dispersion
-    uint32_t rootDispersion = (uint32_t)(rootDispersionSeconds * 65536.0);
-    packet[8] = (rootDispersion >> 24) & 0xFF;
-    packet[9] = (rootDispersion >> 16) & 0xFF;
-    packet[10] = (rootDispersion >> 8) & 0xFF;
-    packet[11] = rootDispersion & 0xFF;
-    
-    // Bytes 12-15: Reference ID (e.g., "GPS\0")
-    memcpy(&packet[12], config.referenceID, 4);
-    
-    // Bytes 16-23: Reference Timestamp (when we last synced to GPS)
-    // Use GPS lock acquisition time
-    uint32_t lockTime = gpsData.lockAcquiredTime;
-    uint16_t lockFraction = gpsData.lockAcquiredFraction;
-    
-    uint32_t refSeconds = gpsData.unixTime + NTP_EPOCH_OFFSET;
-    uint32_t refFraction = ((uint64_t)lockFraction * 4294967296ULL) / 100ULL;
-    
-    writeNTPTimestamp(packet, 16, {refSeconds, refFraction});
-    
-    // Bytes 24-31: Originate Timestamp (copy from client's transmit timestamp)
-    // CRITICAL FIX #1: Copy client's transmit time to our originate
-    memcpy(&packet[24], &request[40], 8);
-    
-    // Bytes 32-39: Receive Timestamp (when we received the packet)
-    // Calculate NTP time at receive
-    NTPTimestamp receiveTime = microsToNTP(receiveTimeMicros);
-    writeNTPTimestamp(packet, 32, receiveTime);
-    
-    // Bytes 40-47: Transmit Timestamp (when we're sending)
-    // Calculate NTP time at transmit
-    NTPTimestamp transmitTime = microsToNTP(transmitTimeMicros);
-    writeNTPTimestamp(packet, 40, transmitTime);
-}
-
-void NTP::sendBroadcast() {
-    if (!config.broadcastEnabled) return;
-    if (!isGPSQualitySufficient()) return;
-    
-    // Build broadcast packet (no request to copy from)
-    byte request[NTP_PACKET_SIZE];
-    memset(request, 0, NTP_PACKET_SIZE);
-    request[0] = 0x23;  // Version 4, Mode 3 (client) - for building
-    request[2] = 6;     // Poll interval
-    
-    uint32_t now = micros();
-    buildNTPPacket(packetBuffer, request, now, now);
-    
-    // Change mode to 5 (broadcast)
-    packetBuffer[0] = (packetBuffer[0] & 0xF8) | 5;
-    
-    // Determine broadcast address
-    // For now, use 255.255.255.255 (limited broadcast)
-    IPAddress broadcast(255, 255, 255, 255);
-    
-    // Send broadcast
-    udpRef->beginPacket(broadcast, NTP_PORT);
-    udpRef->write(packetBuffer, NTP_PACKET_SIZE);
-    udpRef->endPacket();
-    
-    lastBroadcast = millis();
-    metrics.broadcastsSent++;
-    
-    log("NTP: Broadcast sent");
-}
-
-void NTP::sendKissOfDeath(IPAddress clientIP, int port, const char* kissCode) {
-    memset(packetBuffer, 0, NTP_PACKET_SIZE);
-    
-    // Leap = 3 (alarm), Version = 4, Mode = 4 (server)
-    packetBuffer[0] = 0xDC;  // 11 011 100
-    
-    // Stratum = 0 (Kiss-o'-Death)
-    packetBuffer[1] = 0;
-    
-    // Reference ID = Kiss code (4 ASCII chars)
-    memcpy(&packetBuffer[12], kissCode, 4);
-    
-    // All timestamps zero (already cleared by memset)
-    
-    udpRef->beginPacket(clientIP, port);
-    udpRef->write(packetBuffer, NTP_PACKET_SIZE);
-    udpRef->endPacket();
-    
-    metrics.kodSent++;
-    
-    log("NTP: Kiss-o'-Death sent to " + clientIP.toString() + " (Code: " + String(kissCode) + ")");
-}
-
-bool NTP::checkGlobalRateLimit() {
-    uint32_t now = millis();
-    
-    // Reset counter every second
-    if (now - globalRateLimit.lastSecondReset > 1000) {
-        if (globalRateLimit.droppedThisSecond > 0) {
-            log("NTP: Global rate limit dropped " + String(globalRateLimit.droppedThisSecond) + 
-                " requests last second");
-        }
-        globalRateLimit.requestsThisSecond = 0;
-        globalRateLimit.droppedThisSecond = 0;
-        globalRateLimit.lastSecondReset = now;
-    }
-    
-    // Check limit
-    if (globalRateLimit.requestsThisSecond >= config.globalMaxRequestsPerSec) {
-        return false;
-    }
-    
-    globalRateLimit.requestsThisSecond++;
-    return true;
-}
-
-bool NTP::checkClientRateLimit(IPAddress clientIP, uint8_t pollInterval) {
-    NTPClient* client = findOrCreateClient(clientIP);
-    if (!client) return true;  // No tracking available, allow request
-    
-    uint32_t now = millis();
-    uint32_t timeSinceLastRequest = now - client->lastRequest;
-    
-    // Check if request is too frequent
-    if (timeSinceLastRequest < config.perClientMinInterval) {
-        client->rateLimited = true;
-        client->aggressiveCount++;
-        
-        if (client->aggressiveCount > NTP_AGGRESSIVE_THRESHOLD) {
-            client->aggressive = true;
-        }
-        
-        return false;
-    }
-    
-    // Update client stats
-    updateClientStats(client, pollInterval);
-    
-    client->lastRequest = now;
-    client->rateLimited = false;
-    
-    return true;
-}
-
-NTPClient* NTP::findOrCreateClient(IPAddress clientIP) {
-    // Find existing client
-    for (int i = 0; i < clientCount; i++) {
-        if (clients[i].ip == clientIP) {
-            return &clients[i];
-        }
-    }
-    
-    // Find empty slot or oldest entry
-    if (clientCount < config.maxClients) {
-        // Use new slot
-        NTPClient* client = &clients[clientCount++];
-        client->ip = clientIP;
-        client->requestCount = 0;
-        client->lastRequest = 0;
-        client->aggressiveCount = 0;
-        client->aggressive = false;
-        client->rateLimited = false;
-        client->averageInterval = 0;
-        metrics.uniqueClients = clientCount;
-        return client;
-    } else {
-        // Replace oldest entry
-        uint32_t oldestTime = clients[0].lastRequest;
-        int oldestIndex = 0;
-        
-        for (int i = 1; i < config.maxClients; i++) {
-            if (clients[i].lastRequest < oldestTime) {
-                oldestTime = clients[i].lastRequest;
-                oldestIndex = i;
-            }
-        }
-        
-        NTPClient* client = &clients[oldestIndex];
-        client->ip = clientIP;
-        client->requestCount = 0;
-        client->lastRequest = 0;
-        client->aggressiveCount = 0;
-        client->aggressive = false;
-        client->rateLimited = false;
-        client->averageInterval = 0;
-        return client;
-    }
-}
-
-void NTP::updateClientStats(NTPClient* client, uint8_t pollInterval) {
-    client->requestCount++;
-    client->lastPollInterval = pollInterval;
-    
-    // Calculate average interval
-    uint32_t now = millis();
-    if (client->averageInterval == 0) {
-        client->averageInterval = now - client->lastRequest;
-    } else {
-        uint32_t thisInterval = now - client->lastRequest;
-        client->averageInterval = (client->averageInterval * 3 + thisInterval) / 4;
-    }
-}
-
-bool NTP::isGPSQualitySufficient() const {
-    const GPSData& gpsData = gpsRef->getData();
-    
-    // Must have valid time
-    if (!gpsData.timeValid) return false;
-    
-    // Check satellite count
-    if (gpsData.satellites < config.minSatellites) return false;
-    
-    // Check HDOP
-    if (gpsData.hdop > config.maxHDOP) return false;
-    
-    // Check fix age
-    if (gpsData.updateAge > config.maxFixAge) return false;
-    
-    return true;
-}
-
-void NTP::calculateRootDelayDispersion(float& rootDelay, float& rootDispersion) const {
-    const GPSData& gpsData = gpsRef->getData();
-    
-    // Conservative root delay based on PDOP
-    if (gpsData.pdop < 2.0) {
-        rootDelay = 0.001;  // 1ms
-    } else if (gpsData.pdop < 5.0) {
-        rootDelay = 0.005;  // 5ms
-    } else {
-        rootDelay = 0.010;  // 10ms
-    }
-    
-    // Root dispersion: fix age + HDOP contribution
-    rootDispersion = (gpsData.updateAge / 1000.0) + (gpsData.hdop * 0.001);
-    
-    // Cap at reasonable value
-    if (rootDispersion > 1.0) rootDispersion = 1.0;
-}
-
-NTPTimestamp NTP::gpsTimeToNTP() const {
-    const GPSData& gpsData = gpsRef->getData();
-    
-    NTPTimestamp ts;
-    ts.seconds = gpsData.unixTime + NTP_EPOCH_OFFSET;
-    
-    // Convert centiseconds to NTP fraction (2^-32 seconds)
-    // CRITICAL FIX #2: Improved precision
-    ts.fraction = ((uint64_t)gpsData.centisecond * 4294967296ULL) / 100ULL;
-    
-    return ts;
-}
-
-NTPTimestamp NTP::microsToNTP(uint32_t currentMicros) const {
-    const GPSData& gpsData = gpsRef->getData();
-    
-    // Get GPS time as base
-    NTPTimestamp ts = gpsTimeToNTP();
-    
-    // Calculate elapsed time since last GPS update
-    static uint32_t lastGPSUpdateMicros = 0;
-    static uint32_t gpsUpdateMillis = 0;
-    
-    // Update reference when GPS updates
-    if (gpsData.lastUpdateMillis != gpsUpdateMillis) {
-        lastGPSUpdateMicros = currentMicros;
-        gpsUpdateMillis = gpsData.lastUpdateMillis;
-    }
-    
-    // Calculate microseconds elapsed since GPS update
-    uint32_t elapsedMicros = currentMicros - lastGPSUpdateMicros;
-    
-    // Add elapsed time to GPS timestamp
-    // Convert microseconds to NTP fraction
-    uint64_t microsFraction = ((uint64_t)elapsedMicros * 4294967296ULL) / 1000000ULL;
-    
-    // Add to base fraction (with overflow handling)
-    uint64_t newFraction = (uint64_t)ts.fraction + microsFraction;
-    if (newFraction > 0xFFFFFFFFULL) {
-        ts.seconds += (newFraction >> 32);
-        ts.fraction = newFraction & 0xFFFFFFFFULL;
-    } else {
-        ts.fraction = newFraction;
-    }
-    
-    return ts;
-}
-
-void NTP::writeNTPTimestamp(byte* packet, int offset, const NTPTimestamp& ts) {
-    packet[offset + 0] = (ts.seconds >> 24) & 0xFF;
-    packet[offset + 1] = (ts.seconds >> 16) & 0xFF;
-    packet[offset + 2] = (ts.seconds >> 8) & 0xFF;
-    packet[offset + 3] = ts.seconds & 0xFF;
-    packet[offset + 4] = (ts.fraction >> 24) & 0xFF;
-    packet[offset + 5] = (ts.fraction >> 16) & 0xFF;
-    packet[offset + 6] = (ts.fraction >> 8) & 0xFF;
-    packet[offset + 7] = ts.fraction & 0xFF;
-}
-
-uint8_t NTP::extractPollInterval(const byte* packet) {
-    // Poll interval is in log2 seconds
-    uint8_t poll = packet[2];
-    // Clamp to reasonable range (2^4 = 16s to 2^10 = 1024s)
-    if (poll < 4) poll = 4;
-    if (poll > 10) poll = 10;
-    return poll;
-}
-
-uint8_t NTP::extractVersion(const byte* packet) {
-    return (packet[0] >> 3) & 0x07;
-}
-
-uint8_t NTP::extractStratum(const byte* packet) {
-    return packet[1];
-}
-
-void NTP::cleanupStaleClients() {
-    uint32_t now = millis();
-    int removed = 0;
-    
-    for (int i = 0; i < clientCount; i++) {
-        if (now - clients[i].lastRequest > NTP_CLIENT_TIMEOUT) {
-            // Shift remaining clients down
-            for (int j = i; j < clientCount - 1; j++) {
-                clients[j] = clients[j + 1];
-            }
-            clientCount--;
-            removed++;
-            i--;  // Check this slot again
-        }
-    }
-    
-    if (removed > 0) {
-        log("NTP: Cleaned up " + String(removed) + " stale client entries");
-        metrics.uniqueClients = clientCount;
-    }
-}
-
-void NTP::updateMetricsState() {
-    bool wasServing = metrics.currentlyServing;
-    metrics.currentlyServing = isGPSQualitySufficient();
-    
-    if (metrics.currentlyServing && !wasServing) {
-        metrics.servingStartTime = millis();
-        log("NTP: Now serving (GPS quality sufficient)");
-    } else if (!metrics.currentlyServing && wasServing) {
-        metrics.lastServingStopTime = millis();
-        log("NTP: Stopped serving (GPS quality insufficient)");
-    }
-}
-
-void NTP::updateConfig(const NTPConfig& cfg) {
-    config = cfg;
-    log("NTP: Configuration updated");
-}
-
-void NTP::setRateLimits(uint32_t perClientMs, uint32_t globalPerSec) {
-    config.perClientMinInterval = perClientMs;
-    config.globalMaxRequestsPerSec = globalPerSec;
-    log("NTP: Rate limits updated - Client: " + String(perClientMs) + 
-        "ms, Global: " + String(globalPerSec) + "/sec");
-}
-
-bool NTP::isServing() const {
-    return metrics.currentlyServing;
-}
-
-String NTP::getStatusString() const {
-    if (!config.enabled) {
-        return "Disabled";
-    }
-    
-    if (!isGPSQualitySufficient()) {
-        const GPSData& gpsData = gpsRef->getData();
-        
-        if (!gpsData.timeValid) {
-            return "No GPS Time";
-        }
-        if (gpsData.satellites < config.minSatellites) {
-            return "Low Satellites (" + String(gpsData.satellites) + ")";
-        }
-        if (gpsData.hdop > config.maxHDOP) {
-            return "High HDOP (" + String(gpsData.hdop, 1) + ")";
-        }
-        if (gpsData.updateAge > config.maxFixAge) {
-            return "Stale GPS Fix";
-        }
-        return "GPS Quality Insufficient";
-    }
-    
-    return "Serving - Stratum " + String(config.stratum);
-}
-
-void NTP::resetMetrics() {
-    memset(&metrics, 0, sizeof(NTPMetrics));
-    metrics.uniqueClients = clientCount;
-    log("NTP: Metrics reset");
-}
-
-void NTP::setLogCallback(void (*callback)(String)) {
-    logCallback = callback;
-}
-
-void NTP::log(const String& message) {
-    if (logCallback != nullptr) {
-        logCallback(message);
-    }
-}
-
-#endif // NTP_H
+#endif // MQTT_H
