@@ -467,6 +467,12 @@ String generateDashboardJSON(const GPS& gps, const NTP& ntp,
     health["critical_alert"] = gpsHealth.criticalAlert;
     health["warning_alert"] = gpsHealth.warningAlert;
     health["alert_message"] = gpsHealth.alertMessage;
+
+    // Add health issues array
+    JsonArray healthIssues = health.createNestedArray("issues");
+    for (int i = 0; i < gpsHealth.issueCount; i++) {
+        healthIssues.add(gpsHealth.healthIssues[i]);
+    }
     
     // === NTP DATA ===
     JsonObject ntpObj = doc.createNestedObject("ntp");
